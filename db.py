@@ -1,12 +1,14 @@
 import os
 import psycopg2
+import statistics
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from queries import QUERIES, get_date_range
 
 load_dotenv()
 
 def fetch_metrics():
-    start, end, prev_start, prev_prev_start = get_date_range()
+    start, end, eight_weeks_ago = get_date_range()
 
     conn = psycopg2.connect(
         host=os.getenv("DB_HOST"),
@@ -15,29 +17,38 @@ def fetch_metrics():
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD")
     )
-
-    curr = {}
-    prev = {}
     cur = conn.cursor()
 
-    for name, query in QUERIES.items():
-        # 이번 주
-        cur.execute(query.format(
-            start=start, end=end,
-            prev_start=prev_start, prev_prev_start=prev_prev_start
-        ))
-        row = cur.fetchone()
-        curr[name] = row[0] if row else 0
+    curr = {}      # 이번 주
+    prev = {}      # 전주
+    trends = {}    # 8주 시계열 전체
 
-        # 전주 (날짜를 한 주씩 밀어서 계산)
+    prev_start = (datetime.strptime(start, '%Y-%m-%d')
+                  - timedelta(weeks=1)).strftime('%Y-%m-%d')
+    prev_prev_start = (datetime.strptime(start, '%Y-%m-%d')
+                       - timedelta(weeks=2)).strftime('%Y-%m-%d')
+
+    for name, query in QUERIES.items():
         cur.execute(query.format(
-            start=prev_start, end=start,
-            prev_start=prev_prev_start, prev_prev_start=prev_prev_start
+            eight_weeks_ago=eight_weeks_ago,
+            start=start,
+            end=end
         ))
-        row = cur.fetchone()
-        prev[name] = row[0] if row else 0
+        rows = cur.fetchall()
+
+        weekly = {str(row[0]): float(row[1]) if row[1] else 0
+                  for row in rows}
+        trends[name] = weekly
+
+        # 재충전율은 후행 지표 → 한 주 당겨서 본다 (W-2 첫충전자의 W-1 재충전)
+        if name == "재충전율":
+            curr[name] = weekly.get(prev_start, 0)        # W-1 주 값
+            prev[name] = weekly.get(prev_prev_start, 0)   # W-2 주 값
+        else:
+            curr[name] = weekly.get(start, 0)
+            prev[name] = weekly.get(prev_start, 0)
 
     cur.close()
     conn.close()
 
-    return curr, prev, start, end
+    return curr, prev, trends, start, end
